@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  honeypot-api:
+    build: .
+    container_name: honeypot-api
+    ports:
+      - "8000:8000"
+    environment:
+      - HONEYPOT_API_KEY=${HONEYPOT_API_KEY:-sk_test_123456789}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s

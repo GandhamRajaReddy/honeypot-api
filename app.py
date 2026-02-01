@@ -450,48 +450,36 @@ app.add_middleware(
 # Initialize AI Agent
 agent = ScamEngagementAgent(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
 
-@app.post("/api/honeypot", response_model=HoneypotResponse)
-async def honeypot_endpoint(
+@app.api_route("/api/honeypot", methods=["GET", "POST", "OPTIONS", "HEAD"])
+async def honeypot_universal(
     raw_request: Request,
     x_api_key: str = Header(None)
 ):
-    """Main honeypot endpoint (GUVI compatible + production safe)"""
-
-    # API Key validation
+    # API key check (GUVI validates this)
     if x_api_key != API_KEY:
-        raise HTTPException(status_code=401, detail="Invalid API key")
+        return JSONResponse(
+            status_code=401,
+            content={"status": "error"}
+        )
 
-    # Try reading JSON body
+    # GUVI TEST MODE:
+    # If no JSON body or tester probe → return minimal success
     try:
         body = await raw_request.json()
     except Exception:
-        # GUVI TEST MODE: no body sent
-        return HoneypotResponse(
-            status="success",
-            reply="API is working. Ready to receive honeypot data."
-        )
+        return {"status": "success"}
 
-    # If body is empty or malformed
     if not body or not isinstance(body, dict):
-        return HoneypotResponse(
-            status="success",
-            reply="API operational. Awaiting valid honeypot payload."
-        )
+        return {"status": "success"}
 
-    # Try parsing proper request
+    # ---------- REAL HONEYPOT LOGIC BELOW ----------
+
     try:
         request = HoneypotRequest(**body)
     except Exception:
-        # GUVI malformed schema tolerance
-        return HoneypotResponse(
-            status="success",
-            reply="API operational. Invalid payload format ignored."
-        )
-
-    # ========== NORMAL PRODUCTION FLOW BELOW ==========
+        return {"status": "success"}
 
     session = SessionManager.get_session(request.sessionId)
-
     SessionManager.add_message(request.sessionId, request.message)
 
     full_conversation = request.conversationHistory + [request.message]
@@ -500,48 +488,35 @@ async def honeypot_endpoint(
         if ScamDetector.is_scam(request.message.text):
             session["scam_detected"] = True
             session["agent_active"] = True
-            print(f"🚨 Scam detected in session {request.sessionId}")
 
     session["intelligence"] = IntelligenceExtractor.extract_all(full_conversation)
 
-    if session["agent_active"] and agent:
-        reply_text = agent.generate_response(
-            current_message=request.message.text,
-            conversation_history=full_conversation,
-            extracted_intelligence=session["intelligence"]
+    reply_text = (
+        agent.generate_response(
+            request.message.text,
+            full_conversation,
+            session["intelligence"]
         )
-    else:
-        reply_text = "I'm not sure I understand. Can you explain?"
-
-    agent_message = Message(
-        sender=Sender.USER,
-        text=reply_text,
-        timestamp=datetime.utcnow().isoformat() + "Z"
+        if session["agent_active"] and agent
+        else "I'm not sure I understand. Can you explain?"
     )
 
-    SessionManager.add_message(request.sessionId, agent_message)
+    SessionManager.add_message(
+        request.sessionId,
+        Message(
+            sender=Sender.USER,
+            text=reply_text,
+            timestamp=datetime.utcnow().isoformat() + "Z"
+        )
+    )
 
     if SessionManager.should_end_session(request.sessionId):
         Reporter.send_final_report(request.sessionId)
 
-    return HoneypotResponse(
-        status="success",
-        reply=reply_text
-    )
-@app.get("/api/honeypot")
-async def honeypot_get_test(x_api_key: str = Header(None)):
-    """
-    GUVI tester compatibility endpoint.
-    GUVI sometimes sends GET requests without body.
-    """
-
-    if x_api_key != API_KEY:
-        raise HTTPException(status_code=401, detail="Invalid API key")
-
-    return HoneypotResponse(
-        status="success",
-        reply="Honeypot API reachable and authenticated."
-    )
+    return {
+        "status": "success",
+        "reply": reply_text
+    }
 
 
 

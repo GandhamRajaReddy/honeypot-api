@@ -15,6 +15,7 @@ import requests
 from enum import Enum
 import re
 import json
+from fastapi.middleware.cors import CORSMiddleware
 
 # ============================================================================
 # CONFIGURATION
@@ -439,7 +440,13 @@ app = FastAPI(
     description="Scam Detection & Intelligence Extraction System",
     version="1.0.0"
 )
-
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 # Initialize AI Agent
 agent = ScamEngagementAgent(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
 

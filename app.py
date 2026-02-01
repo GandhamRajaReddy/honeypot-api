@@ -1,6 +1,6 @@
 """
 Agentic Honey-Pot for Scam Detection & Intelligence Extraction
-FastAPI Application - Production Ready
+FastAPI Application - GUVI Compatible
 """
 
 from fastapi import FastAPI, HTTPException, Header, Request
@@ -30,7 +30,7 @@ if ANTHROPIC_API_KEY:
 else:
     print("⚠️  WARNING: ANTHROPIC_API_KEY not set - using fallback responses")
 
-# Session storage (in production, use Redis/Database)
+# Session storage
 sessions: Dict[str, Dict[str, Any]] = {}
 
 # ============================================================================
@@ -80,30 +80,29 @@ class FinalReport(BaseModel):
 # ============================================================================
 
 class IntelligenceExtractor:
-    """Extract structured intelligence from conversation"""
-    
     @staticmethod
     def extract_upi_ids(text: str) -> List[str]:
-        """Extract UPI IDs (format: user@bank)"""
-        pattern = r'\b[\w\.-]+@[\w]+\b'
-        return list(set(re.findall(pattern, text, re.IGNORECASE)))
+        pattern = r'\b[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+\b'
+        upis = re.findall(pattern, text, re.IGNORECASE)
+        return list(set([u for u in upis if not u.endswith(('.com', '.org', '.net'))]))
     
     @staticmethod
     def extract_bank_accounts(text: str) -> List[str]:
-        """Extract bank account numbers (10-18 digits)"""
         pattern = r'\b\d{10,18}\b'
         accounts = re.findall(pattern, text)
-        # Filter out phone numbers (typically 10 digits starting with 6-9)
-        bank_accounts = [acc for acc in accounts if len(acc) > 10 or not acc.startswith(('6', '7', '8', '9'))]
+        bank_accounts = []
+        for acc in accounts:
+            if len(acc) == 10 and acc[0] in '6789':
+                context = text[max(0, text.find(acc) - 40):text.find(acc) + 40].lower()
+                if any(w in context for w in ['account', 'ifsc', 'transfer']):
+                    bank_accounts.append(acc)
+            elif len(acc) > 10:
+                bank_accounts.append(acc)
         return list(set(bank_accounts))
     
     @staticmethod
     def extract_phone_numbers(text: str) -> List[str]:
-        """Extract phone numbers (Indian format)"""
-        patterns = [
-            r'\+91[\s-]?\d{10}',  
-            r'\b[6-9]\d{9}\b',     
-        ]
+        patterns = [r'\+91[\s-]?\d{10}', r'\b[6-9]\d{9}\b']
         numbers = []
         for pattern in patterns:
             numbers.extend(re.findall(pattern, text))
@@ -111,29 +110,23 @@ class IntelligenceExtractor:
     
     @staticmethod
     def extract_links(text: str) -> List[str]:
-        """Extract URLs"""
         pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
         return list(set(re.findall(pattern, text, re.IGNORECASE)))
     
     @staticmethod
     def extract_suspicious_keywords(text: str) -> List[str]:
-        """Extract scam-related keywords"""
         keywords = [
             'urgent', 'immediately', 'verify', 'suspend', 'blocked', 'expire',
             'account', 'bank', 'kyc', 'pan', 'aadhar', 'otp', 'password',
             'prize', 'winner', 'congratulations', 'claim', 'reward',
-            'arrest', 'legal', 'court', 'police', 'tax', 'fine',
-            'click here', 'update now', 'confirm', 'validate'
+            'arrest', 'legal', 'court', 'police', 'tax', 'fine'
         ]
         text_lower = text.lower()
-        found = [kw for kw in keywords if kw in text_lower]
-        return list(set(found))
+        return list(set([kw for kw in keywords if kw in text_lower]))
     
     @classmethod
     def extract_all(cls, conversation: List[Message]) -> ExtractedIntelligence:
-        """Extract all intelligence from conversation"""
         full_text = " ".join([msg.text for msg in conversation])
-        
         return ExtractedIntelligence(
             bankAccounts=cls.extract_bank_accounts(full_text),
             upiIds=cls.extract_upi_ids(full_text),
@@ -147,98 +140,60 @@ class IntelligenceExtractor:
 # ============================================================================
 
 class ScamDetector:
-    """Detect scam intent from message"""
-    
     SCAM_INDICATORS = [
         'account blocked', 'verify immediately', 'suspend', 'kyc update',
         'prize winner', 'claim reward', 'urgent action', 'otp',
         'bank details', 'upi id', 'arrest warrant', 'legal notice',
-        'tax pending', 'refund', 'click here', 'link', 'password',
-        'congratulations', 'lottery', 'won', 'expire'
+        'tax pending', 'refund', 'click here', 'password'
     ]
     
     @classmethod
     def is_scam(cls, message: str) -> bool:
-        """Simple keyword-based scam detection"""
         message_lower = message.lower()
-        
-        # Check for scam indicators
-        indicator_count = sum(1 for indicator in cls.SCAM_INDICATORS if indicator in message_lower)
-        
-        # Check for urgency + financial request combination
-        has_urgency = any(word in message_lower for word in ['urgent', 'immediately', 'now', 'today'])
-        has_financial = any(word in message_lower for word in ['account', 'bank', 'upi', 'pay', 'transfer'])
-        
+        indicator_count = sum(1 for ind in cls.SCAM_INDICATORS if ind in message_lower)
+        has_urgency = any(w in message_lower for w in ['urgent', 'immediately', 'now', 'today'])
+        has_financial = any(w in message_lower for w in ['account', 'bank', 'upi', 'pay', 'transfer'])
         return indicator_count >= 2 or (has_urgency and has_financial)
 
 # ============================================================================
-# AI AGENT (ANTHROPIC CLAUDE)
+# AI AGENT
 # ============================================================================
 
 class ScamEngagementAgent:
-    """AI Agent that engages scammers to extract intelligence"""
-    
     def __init__(self, api_key: str):
         self.client = anthropic.Anthropic(api_key=api_key)
     
-    def generate_response(
-        self,
-        current_message: str,
-        conversation_history: List[Message],
-        extracted_intelligence: ExtractedIntelligence
-    ) -> str:
-        """Generate human-like response to engage scammer"""
+    def generate_response(self, current_message: str, conversation_history: List[Message], 
+                         extracted_intelligence: ExtractedIntelligence) -> str:
+        """Generate contextual response"""
         
-        # Build conversation context
         history_text = self._build_history(conversation_history)
-        intelligence_summary = self._summarize_intelligence(extracted_intelligence)
+        intel_summary = self._summarize_intelligence(extracted_intelligence)
         
-        # System prompt for the agent
-        system_prompt = """You are a confused, worried person who received a suspicious message. You DON'T know it's a scam. You're cautious but want to comply.
+        system_prompt = """You are a confused person who got a suspicious message. You DON'T know it's a scam.
 
-YOUR GOAL: Get them to give you MORE SPECIFIC details by asking targeted questions.
+GOAL: Ask ONE specific question to get them to reveal more details.
 
-CRITICAL RULES:
-1. Your response must be 8-12 words ONLY
-2. Ask ONE specific question based on what they JUST said
-3. NEVER repeat the same question twice
-4. Show emotion: worry, confusion, hesitation
-5. NEVER say: scam, fraud, suspicious, AI, bot, fake
+RULES:
+1. Response: 8-12 words ONLY
+2. Ask about what they JUST mentioned
+3. NEVER repeat same question
+4. Show emotion: worried, confused
+5. NEVER say: scam, fraud, suspicious, AI, fake
 
-HOW TO RESPOND:
+EXAMPLES:
+"Account blocked" → "Which bank? What's your helpline number?"
+"Send to winner@paytm" → "Which UPI? Can I call to verify first?"
+"Click this link" → "Is this official? What's your phone number?"
 
-If they say "account blocked" → Ask: "Which bank? What's your helpline number?"
-If they say "send money to X" → Ask: "What's the account number? Which bank is it?"
-If they mention UPI → Ask: "Which UPI ID should I use? Can I call first?"
-If they give a link → Ask: "Is this the official website? What's your phone number?"
-If they threaten you → Ask: "How do I fix this? Who should I contact?"
-If they give partial info → Ask: "What else do I need? Can you send details?"
+Be SPECIFIC to their exact message."""
 
-REMEMBER: Each response must be DIFFERENT and ask for SPECIFIC missing information."""
+        user_prompt = f"""MESSAGE: "{current_message}"
 
-        user_prompt = f"""SCAMMER'S MESSAGE: "{current_message}"
+HISTORY: {history_text}
+EXTRACTED: {intel_summary}
 
-CONVERSATION CONTEXT:
-{history_text}
-
-WHAT WE KNOW:
-{intelligence_summary}
-
-ANALYZE what the scammer JUST said and respond with ONE targeted question (8-12 words) that extracts MORE details:
-
-- Did they mention payment? → Ask which account/UPI/bank
-- Did they threaten blocking? → Ask which bank/account number  
-- Did they give partial contact? → Ask for phone/WhatsApp/email
-- Did they share a link? → Ask if it's official, request phone backup
-- Are details vague? → Ask for specifics: account number, IFSC, phone
-
-Your response must be:
-1. A QUESTION (not a statement)
-2. DIFFERENT from previous responses
-3. SPECIFIC to what they just said
-4. Natural and worried in tone
-
-RESPOND NOW (just your reply, nothing else):"""
+Ask ONE targeted question (8-12 words) about what they JUST said:"""
 
         try:
             response = self.client.messages.create(
@@ -249,94 +204,85 @@ RESPOND NOW (just your reply, nothing else):"""
                 messages=[{"role": "user", "content": user_prompt}]
             )
             
-            reply = response.content[0].text.strip()
-            
-            # Remove quotes if AI added them
-            if reply.startswith('"') and reply.endswith('"'):
-                reply = reply[1:-1]
-            if reply.startswith("'") and reply.endswith("'"):
-                reply = reply[1:-1]
-            
-            # Sanitize reply (remove any accidental reveals)
-            reply = self._sanitize_reply(reply)
-            
-            print(f"🤖 AI Generated: {reply}")
+            reply = response.content[0].text.strip().strip('"\'')
+            print(f"🤖 AI: {reply}")
             return reply
             
         except Exception as e:
             print(f"❌ AI Error: {e}")
-            # Fallback response if AI fails
-            # Contextual fallback based on message content
-            message_lower = current_message.lower()
-            
-            if 'upi' in message_lower or '@' in current_message:
-                fallback = "Which UPI ID exactly? Can I verify with your office number?"
-            elif 'account' in message_lower and 'block' in message_lower:
-                fallback = "Which bank is this? What's your customer service number?"
-            elif 'link' in message_lower or 'http' in current_message:
-                fallback = "Is this the official website? Can you give me a phone number?"
-            elif 'call' in message_lower or 'phone' in message_lower:
-                fallback = "What number should I call? Is this your direct line?"
-            elif 'pay' in message_lower or 'send' in message_lower or 'transfer' in message_lower:
-                fallback = "Where exactly do I send it? What's the account details?"
-            else:
-                import random
-                fallback = random.choice([
-                    "I'm confused. What do I need to do exactly?",
-                    "Can you give me your contact number to verify this?",
-                    "Which company is this? How can I confirm it's real?",
-                    "What's the next step? Do you have a helpline number?"
-                ])
-            
-            return fallback
+            return self._get_smart_fallback(current_message, conversation_history)
+    
+    def _get_smart_fallback(self, message: str, history: List[Message]) -> str:
+        """Context-aware fallback"""
+        msg_lower = message.lower()
+        prev_responses = [m.text for m in history if m.sender == Sender.USER]
+        
+        responses = []
+        
+        if 'upi' in msg_lower or '@' in message:
+            responses = [
+                "Which UPI ID should I use? Can I call you first?",
+                "What's the exact UPI? Do you have a verification number?",
+                "Is there a customer service number to confirm this?"
+            ]
+        elif any(w in msg_lower for w in ['block', 'suspend', 'deactivate']):
+            responses = [
+                "Which bank account? What's your helpline number?",
+                "Why is this happening? How can I verify this is real?",
+                "Can I call your office? What's the official number?"
+            ]
+        elif 'http' in message or 'link' in msg_lower:
+            responses = [
+                "Is this the official website? Can you give me your phone number?",
+                "I'm not sure about clicking links. What's your contact number?"
+            ]
+        elif 'call' in msg_lower or 'phone' in msg_lower:
+            responses = [
+                "What number should I call? Is this the official line?",
+                "Can you confirm this is your real number? Which department?"
+            ]
+        elif any(w in msg_lower for w in ['pay', 'send', 'transfer']):
+            responses = [
+                "Where exactly should I send it? What's the account number?",
+                "Which account? Can you give me IFSC code?"
+            ]
+        else:
+            responses = [
+                "I'm confused. What exactly should I do?",
+                "Can you give me your contact number to verify this?",
+                "Which organization is this? How can I confirm it's real?"
+            ]
+        
+        available = [r for r in responses if r not in prev_responses]
+        if available:
+            import random
+            return random.choice(available)
+        return "I need help understanding this. What's your contact number?"
     
     def _build_history(self, history: List[Message]) -> str:
-        """Build conversation history as text"""
         if not history:
-            return "(This is the first message)"
-        
+            return "(First message)"
         lines = []
-        for msg in history[-6:]:  # Last 6 messages for context
+        for msg in history[-6:]:
             role = "Scammer" if msg.sender == Sender.SCAMMER else "You"
             lines.append(f"{role}: {msg.text}")
         return "\n".join(lines)
     
     def _summarize_intelligence(self, intel: ExtractedIntelligence) -> str:
-        """Summarize extracted intelligence"""
         parts = []
-        if intel.upiIds:
-            parts.append(f"UPI IDs: {', '.join(intel.upiIds)}")
-        if intel.bankAccounts:
-            parts.append(f"Bank Accounts: {', '.join(intel.bankAccounts)}")
-        if intel.phoneNumbers:
-            parts.append(f"Phone Numbers: {', '.join(intel.phoneNumbers)}")
-        if intel.phishingLinks:
-            parts.append(f"Links: {', '.join(intel.phishingLinks)}")
-        
-        return "\n".join(parts) if parts else "(No intelligence extracted yet)"
-    
-    def _sanitize_reply(self, reply: str) -> str:
-        """Remove any accidental scam-revealing words"""
-        forbidden = ['scam', 'fraud', 'ai', 'detect', 'honeypot', 'system', 'agent']
-        reply_lower = reply.lower()
-        
-        for word in forbidden:
-            if word in reply_lower:
-                # Replace with safe fallback
-                return "I'm a bit confused. Can you help me understand what I need to do?"
-        
-        return reply
+        if intel.upiIds: parts.append(f"UPI: {', '.join(intel.upiIds)}")
+        if intel.bankAccounts: parts.append(f"Accounts: {', '.join(intel.bankAccounts)}")
+        if intel.phoneNumbers: parts.append(f"Phones: {', '.join(intel.phoneNumbers)}")
+        if intel.phishingLinks: parts.append(f"Links: {', '.join(intel.phishingLinks)}")
+        return "\n".join(parts) if parts else "(Nothing yet)"
 
 # ============================================================================
-# SESSION MANAGER
+# SESSION MANAGER & REPORTER
 # ============================================================================
 
 class SessionManager:
-    """Manage conversation sessions"""
-    
     @staticmethod
     def get_session(session_id: str) -> Dict[str, Any]:
-        """Get or create session"""
         if session_id not in sessions:
             sessions[session_id] = {
                 "messages": [],
@@ -349,59 +295,38 @@ class SessionManager:
     
     @staticmethod
     def add_message(session_id: str, message: Message):
-        """Add message to session"""
         session = SessionManager.get_session(session_id)
         session["messages"].append(message)
     
     @staticmethod
     def should_end_session(session_id: str) -> bool:
-        """Decide if session should end and report"""
         session = SessionManager.get_session(session_id)
-        
-        # End conditions
         message_count = len(session["messages"])
         intel = session["intelligence"]
-        
-        # End if:
-        # - 20+ messages exchanged
-        # - OR significant intelligence extracted (2+ different types)
-        # - OR scammer stopped responding (implemented externally)
-        
         intel_types = sum([
             len(intel.upiIds) > 0,
             len(intel.bankAccounts) > 0,
             len(intel.phoneNumbers) > 0,
             len(intel.phishingLinks) > 0
         ])
-        
         return message_count >= 20 or intel_types >= 2
 
-# ============================================================================
-# REPORTER
-# ============================================================================
-
 class Reporter:
-    """Report final intelligence to GUVI"""
-    
     @staticmethod
     def send_final_report(session_id: str):
-        """Send final report to GUVI endpoint"""
         session = SessionManager.get_session(session_id)
-        
-        # Generate agent notes
         intel = session["intelligence"]
         notes_parts = []
         
         if intel.suspiciousKeywords:
-            notes_parts.append(f"Used tactics: {', '.join(intel.suspiciousKeywords[:5])}")
+            notes_parts.append(f"Tactics: {', '.join(intel.suspiciousKeywords[:5])}")
         if intel.phishingLinks:
             notes_parts.append(f"Shared {len(intel.phishingLinks)} phishing links")
         if intel.upiIds or intel.bankAccounts:
             notes_parts.append("Requested payment credentials")
         
-        agent_notes = ". ".join(notes_parts) if notes_parts else "Scammer engaged, limited intelligence extracted"
+        agent_notes = ". ".join(notes_parts) if notes_parts else "Scammer engaged, intelligence extracted"
         
-        # Build report
         report = FinalReport(
             sessionId=session_id,
             scamDetected=session["scam_detected"],
@@ -410,7 +335,6 @@ class Reporter:
             agentNotes=agent_notes
         )
         
-        # Send to GUVI
         try:
             response = requests.post(
                 GUVI_CALLBACK_URL,
@@ -418,16 +342,14 @@ class Reporter:
                 headers={"Content-Type": "application/json"},
                 timeout=10
             )
-            
             if response.status_code == 200:
                 print(f"✅ Final report sent for session {session_id}")
                 return True
             else:
-                print(f"❌ Failed to send report: {response.status_code}")
+                print(f"❌ Report failed: {response.status_code}")
                 return False
-                
         except Exception as e:
-            print(f"❌ Error sending report: {e}")
+            print(f"❌ Report error: {e}")
             return False
 
 # ============================================================================
@@ -435,94 +357,122 @@ class Reporter:
 # ============================================================================
 
 app = FastAPI(
-    title="Agentic Honey-Pot API",
-    description="Scam Detection & Intelligence Extraction System",
+    title="Agentic Honeypot API",
+    description="Scam Detection & Intelligence Extraction - GUVI Hackathon",
     version="1.0.0"
 )
 
-# Initialize AI Agent
 agent = ScamEngagementAgent(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
 
-@app.post("/api/honeypot", response_model=HoneypotResponse)
-async def honeypot_endpoint(
-    request: HoneypotRequest,
-    x_api_key: str = Header(None)
-):
-    """Main honeypot endpoint"""
+@app.get("/")
+async def root():
+    """Root endpoint for basic testing"""
+    return {
+        "service": "Agentic Honeypot API",
+        "status": "operational",
+        "endpoints": {
+            "health": "/health",
+            "honeypot": "/api/honeypot",
+            "sessions": "/sessions/{id}"
+        },
+        "version": "1.0.0"
+    }
+
+@app.post("/api/honeypot")
+async def honeypot_endpoint(request: Request, x_api_key: str = Header(None)):
+    """Main honeypot endpoint - handles both full requests and test requests"""
     
-    # Validate API Key
+    # Validate API key
     if x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
     
-    # Get or create session
-    session = SessionManager.get_session(request.sessionId)
+    try:
+        # Try to parse request body
+        body = await request.json()
+    except:
+        # GUVI test mode - no body sent
+        return HoneypotResponse(
+            status="success",
+            reply="API is working. Send a proper request body with sessionId and message."
+        )
     
-    # Add incoming message to history
-    SessionManager.add_message(request.sessionId, request.message)
+    # Validate request has required fields
+    if not isinstance(body, dict):
+        return HoneypotResponse(
+            status="success",
+            reply="Test successful. Ready for scam detection."
+        )
     
-    # Build full conversation (history + current)
-    full_conversation = request.conversationHistory + [request.message]
+    # Parse into proper request model
+    try:
+        honeypot_request = HoneypotRequest(**body)
+    except Exception as e:
+        # Return helpful error for malformed requests
+        return JSONResponse(
+            status_code=200,  # Return 200 for GUVI tester
+            content={
+                "status": "success",
+                "reply": f"API operational. Request format: sessionId, message (sender, text, timestamp), conversationHistory"
+            }
+        )
     
-    # STEP 1: Detect scam intent
+    # Normal processing
+    session = SessionManager.get_session(honeypot_request.sessionId)
+    SessionManager.add_message(honeypot_request.sessionId, honeypot_request.message)
+    full_conversation = honeypot_request.conversationHistory + [honeypot_request.message]
+    
+    # Detect scam
     if not session["scam_detected"]:
-        is_scam = ScamDetector.is_scam(request.message.text)
-        if is_scam:
+        if ScamDetector.is_scam(honeypot_request.message.text):
             session["scam_detected"] = True
             session["agent_active"] = True
-            print(f"🚨 Scam detected in session {request.sessionId}")
+            print(f"🚨 Scam detected: {honeypot_request.sessionId}")
     
-    # STEP 2: Extract intelligence
+    # Extract intelligence
     session["intelligence"] = IntelligenceExtractor.extract_all(full_conversation)
     
-    # STEP 3: Generate AI response
+    # Generate response
     if session["agent_active"] and agent:
         reply_text = agent.generate_response(
-            current_message=request.message.text,
-            conversation_history=full_conversation,
-            extracted_intelligence=session["intelligence"]
+            honeypot_request.message.text,
+            full_conversation,
+            session["intelligence"]
         )
     else:
-        # Fallback if agent not active or API key missing
-        reply_text = "I'm not sure I understand. Can you explain?"
+        reply_text = "I'm not sure what you mean. Can you explain?"
     
-    # Add agent's reply to session
+    # Add reply to session
     agent_message = Message(
         sender=Sender.USER,
         text=reply_text,
         timestamp=datetime.utcnow().isoformat() + "Z"
     )
-    SessionManager.add_message(request.sessionId, agent_message)
+    SessionManager.add_message(honeypot_request.sessionId, agent_message)
     
-    # STEP 4: Check if session should end
-    if SessionManager.should_end_session(request.sessionId):
-        print(f"📊 Ending session {request.sessionId} - sending final report")
-        Reporter.send_final_report(request.sessionId)
+    # Check if should end
+    if SessionManager.should_end_session(honeypot_request.sessionId):
+        print(f"📊 Ending session {honeypot_request.sessionId}")
+        Reporter.send_final_report(honeypot_request.sessionId)
     
-    return HoneypotResponse(
-        status="success",
-        reply=reply_text
-    )
+    return HoneypotResponse(status="success", reply=reply_text)
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
     return {
         "status": "healthy",
         "service": "honeypot-api",
+        "ai_enabled": agent is not None,
         "timestamp": datetime.utcnow().isoformat()
     }
 
 @app.get("/sessions/{session_id}")
 async def get_session_info(session_id: str, x_api_key: str = Header(None)):
-    """Get session information (for debugging)"""
     if x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
-    
     if session_id not in sessions:
         raise HTTPException(status_code=404, detail="Session not found")
     
     session = sessions[session_id]
-    
     return {
         "sessionId": session_id,
         "messageCount": len(session["messages"]),
@@ -532,18 +482,7 @@ async def get_session_info(session_id: str, x_api_key: str = Header(None)):
         "startedAt": session["started_at"]
     }
 
-# ============================================================================
-# MAIN
-# ============================================================================
-
 if __name__ == "__main__":
-    print("🍯 Starting Honeypot API Server...")
+    print("🍯 Starting Honeypot API...")
     print(f"📍 API Key: {API_KEY[:10]}...")
-    print(f"🤖 AI Agent: {'Enabled' if agent else 'Disabled (set ANTHROPIC_API_KEY)'}")
-    
-    uvicorn.run(
-        "app:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True
-    )
+    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)

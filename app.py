@@ -521,6 +521,21 @@ async def honeypot_endpoint(
         status="success",
         reply=reply_text
     )
+@app.get("/api/honeypot")
+async def honeypot_get_test(x_api_key: str = Header(None)):
+    """
+    GUVI tester compatibility endpoint.
+    GUVI sometimes sends GET requests without body.
+    """
+
+    if x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    return HoneypotResponse(
+        status="success",
+        reply="Honeypot API reachable and authenticated."
+    )
+
 
 
 @app.get("/health")
